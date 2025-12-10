@@ -86,5 +86,27 @@ SUPABASE_KEY=
 
 # 追加ライブラリ
 pip install ytmusicapi
-
 npm install react-youtube react-icons react-leaflet leaflet
+
+
+流れとしては
+接続には
+import os
+from dotenv import load_dotenv
+from supabase import create_client
+from pathlib import Path
+この辺が必要
+# .envファイルを作成し下記を記入する。
+SUPABASE_URL=
+SUPABASE_KEY=
+# 環境変数の読み込み
+current_dir = Path(__file__).parent.absolute()
+dotenv_path = current_dir / '.env'
+load_dotenv(dotenv_path)
+# 環境変数から Supabase の接続情報を取得
+supabase_url = os.environ.get("SUPABASE_URL")
+supabase_key = os.environ.get("SUPABASE_KEY")
+# Supabase クライアントの初期化
+supabase = create_client(supabase_url, supabase_key)
+print("Supabase client initialized successfully!")
+ここまで行ければ接続ができるからあとはそのままいろいろ記述してDBからデータの書き読み込みができる。
