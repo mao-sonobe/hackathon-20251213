@@ -192,25 +192,75 @@ async def signin_user(req: AuthRequest):
     
     
 # -------------------------------------------------------------------------
-# 既存のAPIエンドポイント
+# APIエンドポイント
 # -------------------------------------------------------------------------
 # ★注意: 認証後、これらのエンドポイントにはトークン検証ミドルウェアが必要です。
 # 現状はデモのため、認証ロジックを省略しています。
 
+# -------------------------------------------------------------------------
+# 曲保存エンドポイント
+# -------------------------------------------------------------------------
+
 @app.get("/api/songs")
 async def get_songs():
-    """近くのユーザーの曲リストを返す (ダミー)"""
-    return JSONResponse(content=DUMMY_SONGS)
+    """近くのユーザーの曲リストをSupabaseから取得する"""
+    if not use_supabase:
+        # Supabaseが使えない場合は、既存のバックアップデータまたは空リストを返す
+        print("⚠️ Supabase not configured. Returning DUMMY_SONGS.")
+        return JSONResponse(content=DUMMY_SONGS) 
+        
+    try:
+        # shared_songsテーブルから全データを取得。
+        # クライアント側で最新の1曲に絞り込むため、created_atで昇順 (古い順) に並び替える
+        # ことで、最新のデータがMapに上書きされることを保証します。
+        response = supabase.table('shared_songs').select('*').order('created_at', ascending=True).execute()
+
+        return JSONResponse(content=response.data)
+
+    except Exception as e:
+        print(f"Supabase取得エラー: {e}")
+        # エラー発生時も空のリストまたはバックアップデータを返す
+        return JSONResponse(content=DUMMY_SONGS)
 
 @app.post("/api/songs")
 async def add_song(song: SongRequest):
-    """自分の曲をシェアする (ダミー)"""
-    new_song = song.dict()
-    new_song["id"] = len(DUMMY_SONGS) + 1
-    DUMMY_SONGS.append(new_song)
-    print(f"Share received: {new_song['title']}")
-    return new_song
+    """自分の曲をSupabaseにシェアする"""
+    if not use_supabase:
+        return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
+    
+    # Pydanticモデルから辞書を取得
+    song_data = song.dict()
 
+    # Supabaseに挿入するデータ
+    data_to_insert = {
+        "title": song_data.get("title"),
+        "artist": song_data.get("artist"),
+        "sharedBy": song_data.get("sharedBy"),
+        "distance": song_data.get("distance", "0m"),
+        "videoId": song_data.get("videoId"),
+        "lat": song_data.get("lat"),
+        "lng": song_data.get("lng"),
+        # Supabase側で created_at は自動生成されることを想定
+    }
+
+    try:
+        # shared_songsテーブルにデータを挿入
+        # .execute()を呼び出して実行
+        response = supabase.table('shared_songs').insert(data_to_insert).execute()
+        
+        # 挿入されたレコードを返す
+        if response.data:
+            print(f"Share saved to Supabase: {response.data[0]['title']}")
+            return JSONResponse(content=response.data[0])
+        else:
+            raise Exception("Supabase insert failed: No data returned")
+
+    except Exception as e:
+        print(f"Supabase挿入エラー: {traceback.format_exc()}")
+        return JSONResponse(content={"error": "曲の共有に失敗しました"}, status_code=500)
+# -------------------------------------------------------------------------
+# APIエンドポイント
+# -------------------------------------------------------------------------
 @app.get("/api/charts")
 async def get_charts():
     """ホーム画面用: 人気アーティストのMVを検索してトレンドとして返す"""
