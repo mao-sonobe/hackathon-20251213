@@ -1,19 +1,19 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'; // useCallbackをimportに追加
+import React, { useState, useEffect, useRef, useCallback } from 'react'; 
 import axios from 'axios';
 import YouTube from 'react-youtube';
 import { 
   FaPlay, FaPause, FaChevronDown, FaList, FaHome, FaSearch, FaPlus, 
   FaTimes, FaUserFriends, FaArrowLeft, FaEllipsisV, 
   FaRedo, FaUndo, FaUserCircle, FaHeart, FaRegHeart, FaCommentDots, 
-  FaPaperPlane, FaSignInAlt, FaMusic, FaCheckDouble 
-} from 'react-icons/fa'; // FaMapMarkerAltを削除
+  FaPaperPlane, FaSignInAlt, FaMusic, FaCheckDouble, FaCompactDisc 
+} from 'react-icons/fa'; 
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 
-import './App.css'; // 最後にあったCSS importを最上部に移動
+import './App.css'; 
 
 let DefaultIcon = L.icon({
     iconUrl: icon,
@@ -24,12 +24,8 @@ let DefaultIcon = L.icon({
 });
 L.Marker.prototype.options.icon = DefaultIcon;
 
-// FastAPIの認証エンドポイントのベースURL
-const API_BASE_URL = 'http://127.0.0.1:8000/api/auth';
+const API_BASE_URL = 'http://127.0.0.1:8000/api'; // エンドポイント修正
 
-/**
- * 秒数を「m:ss」形式の文字列にフォーマットするヘルパー関数
- */
 const formatTime = (seconds) => {
   if (!seconds) return "0:00";
   const m = Math.floor(seconds / 60);
@@ -37,9 +33,17 @@ const formatTime = (seconds) => {
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 };
 
-/**
- * マップの中心座標を更新するためのカスタムコンポーネント
- */
+// ★追加: ピンの位置を固定するための計算式
+const getStableOffset = (str) => {
+    if (!str) return 0;
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    // 常に同じズレ幅(-0.005 〜 +0.005)を返す
+    return (hash % 1000) / 100000; 
+};
+
 function MapUpdater({ center }) {
   const map = useMap();
   useEffect(() => {
@@ -48,9 +52,6 @@ function MapUpdater({ center }) {
   return null;
 }
 
-/**
- * 2つの地理座標間の距離（メートル）を概算する関数
- */
 function getDistance(lat1, lng1, lat2, lng2) {
   if(!lat1 || !lng1 || !lat2 || !lng2) return 0;
   const x = (lng2 - lng1) * Math.cos((lat1 + lat2) / 2 * (Math.PI / 180)); 
@@ -59,10 +60,10 @@ function getDistance(lat1, lng1, lat2, lng2) {
 }
 
 // -------------------------------------------------------------
-// 【新規コンポーネント】Supabase認証画面
+// Supabase認証画面 (変更なし)
 // -------------------------------------------------------------
 function AuthScreen({ onLoginSuccess }) {
-  const [isSignUp, setIsSignUp] = useState(false); // サインアップモードかサインインモードか
+  const [isSignUp, setIsSignUp] = useState(false); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
@@ -80,19 +81,17 @@ function AuthScreen({ onLoginSuccess }) {
       : { email, password };
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/${endpoint}`, payload);
+      const response = await axios.post(`${API_BASE_URL}/auth/${endpoint}`, payload);
       
       if (response.status === 200 && response.data.session) {
-        // ログイン成功: ユーザー名とトークンを親コンポーネントに渡す
-        const receivedUsername = response.data.username || username;
+        const receivedUsername = response.data.username || username || email.split('@')[0];
         onLoginSuccess(receivedUsername, response.data.session.access_token);
       } else {
         setError("認証エラーが発生しました。");
       }
     } catch (err) {
       console.error("Auth Error:", err.response ? err.response.data : err);
-      // FastAPIから返されたエラーメッセージを表示
-      setError(err.response?.data?.error || "認証に失敗しました。メールアドレスとパスワードを確認してください。");
+      setError(err.response?.data?.error || "認証に失敗しました。");
     } finally {
       setLoading(false);
     }
@@ -166,14 +165,12 @@ function AuthScreen({ onLoginSuccess }) {
 }
 
 // -------------------------------------------------------------
-// Appコンポーネント (メインロジック)
+// Appコンポーネント
 // -------------------------------------------------------------
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [myUsername, setMyUsername] = useState("");
-  // ★認証トークンを保持するState
   const [authToken, setAuthToken] = useState(null); 
-  // [NEW] 認証ローディング状態
   const [authLoading, setAuthLoading] = useState(true); 
 
   const [activeTab, setActiveTab] = useState('home');
@@ -205,43 +202,25 @@ function App() {
   const [myLocation, setMyLocation] = useState([35.681236, 139.767125]);
   const [locationLoaded, setLocationLoaded] = useState(false);
 
-  // -------------------------------------------------------------
-  // 認証関連ハンドラ
-  // -------------------------------------------------------------
-
-  // APIリクエストに認証ヘッダーを付与するヘルパー
-  // useCallbackでラップし、authTokenが変更されたときのみ関数が再生成されるようにする
   const getAuthHeader = useCallback(() => {
     return authToken ? { Authorization: `Bearer ${authToken}` } : {};
   }, [authToken]);
 
-  // ログイン成功時の処理
   const handleLoginSuccess = (username, token) => {
     setMyUsername(username);
     setAuthToken(token);
     setIsLoggedIn(true);
-    // トークンをLocalStorageに保存するなどして永続化することが推奨されます
   };
 
-  // ログアウト処理
   const handleLogout = () => {
-    // 状態をリセット
     setMyUsername("");
     setAuthToken(null);
     setIsLoggedIn(false);
-    
-    // LocalStorageのトークンを削除する処理も必要
     setActiveTab('home');
   };
 
-  // -------------------------------------------------------------
-  // useEffect - 初期ロード & 位置情報取得
-  // -------------------------------------------------------------
   useEffect(() => {
-    // 実際にはLocalStorageからトークンをロードし、検証する処理が入る
-    // 今回は簡単のため、認証チェックはスキップし、すぐにロード完了とする
     setAuthLoading(false);
-
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => { setMyLocation([pos.coords.latitude, pos.coords.longitude]); setLocationLoaded(true); },
@@ -249,23 +228,30 @@ function App() {
       );
     } else { setLocationLoaded(true); }
     
-    // 初期チャートの取得（認証は不要と仮定）
-    axios.get('http://127.0.0.1:8000/api/charts').then(res => setPopularSongs(res.data)).catch(() => setPopularSongs([]));
+    axios.get(`${API_BASE_URL}/charts`).then(res => setPopularSongs(res.data)).catch(() => setPopularSongs([]));
   }, []);
 
-  // -------------------------------------------------------------
-  // useEffect - 近くの曲の定期的な取得 (認証必須)
-  // -------------------------------------------------------------
+  // --- ★修正: 近くの曲更新 (重複排除 & ピン固定) ---
   useEffect(() => {
     if (!locationLoaded || !isLoggedIn) return;
     
     const fetchNearby = () => {
-      // ★認証ヘッダーを付けてAPIを呼び出す
-      axios.get('http://127.0.0.1:8000/api/songs', { headers: getAuthHeader() }).then(res => {
-          const songsAroundMe = res.data.map((song) => {
+      axios.get(`${API_BASE_URL}/songs`, { headers: getAuthHeader() }).then(res => {
+          // 1. 重複排除 (最新の1曲だけ残す)
+          const uniqueSongsMap = new Map();
+          res.data.forEach(song => {
+              // 共有者名をキーにして上書き
+              uniqueSongsMap.set(song.sharedBy, song);
+          });
+          const uniqueSongs = Array.from(uniqueSongsMap.values());
+
+          const songsAroundMe = uniqueSongs.map((song) => {
             if (song.lat && song.lng) return song;
-            const latOffset = (Math.random() - 0.5) * 0.005; 
-            const lngOffset = (Math.random() - 0.5) * 0.005;
+            
+            // 2. ピン固定 (名前から座標オフセットを計算)
+            const latOffset = getStableOffset(song.sharedBy);
+            const lngOffset = getStableOffset(song.sharedBy + "_lng");
+            
             return { ...song, lat: myLocation[0] + latOffset, lng: myLocation[1] + lngOffset };
           });
           setNearbySongs(songsAroundMe);
@@ -274,9 +260,8 @@ function App() {
     fetchNearby();
     const interval = setInterval(fetchNearby, 5000);
     return () => clearInterval(interval);
-  }, [locationLoaded, myLocation, isLoggedIn, getAuthHeader]); // getAuthHeaderを依存配列に追加
+  }, [locationLoaded, myLocation, isLoggedIn, getAuthHeader]);
 
-  // ... 既存のuseEffect (プレイヤー時間更新, チャット自動スクロール) ...
   useEffect(() => {
     if (!playerObj || !isPlaying) return;
     const timeInterval = setInterval(() => {
@@ -287,11 +272,6 @@ function App() {
   }, [playerObj, isPlaying, duration]);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatHistory, activeChat]);
-
-
-  // -------------------------------------------------------------
-  // イベントハンドラー (一部認証対応)
-  // -------------------------------------------------------------
 
   const resetHome = () => { 
       setActiveTab('home'); 
@@ -304,23 +284,25 @@ function App() {
   const handleSearch = (e) => {
     if (e.key === 'Enter' && searchQuery.trim() !== "") {
       setIsSearching(true); setSearchResults([]);
-      // 検索APIも認証不要と仮定
-      axios.get(`http://127.0.0.1:8000/api/search?q=${searchQuery}`).then(res => setSearchResults(res.data)).catch(() => alert("検索失敗"));
+      axios.get(`${API_BASE_URL}/search?q=${searchQuery}`).then(res => setSearchResults(res.data)).catch(() => alert("検索失敗"));
     }
   };
 
   const openUserProfile = (e, song) => {
     e.stopPropagation();
+    // ★追加: 他人のプレイリスト用ダミーデータ (デモ用)
+    const dummyPlaylist = popularSongs.sort(() => 0.5 - Math.random()).slice(0, 5);
+
     setViewingUser({
         name: song.sharedBy || 'Unknown',
         currentSong: song.title,
         artist: song.artist,
         image: song.image,
-        dist: getDistance(myLocation[0], myLocation[1], song.lat, song.lng)
+        dist: getDistance(myLocation[0], myLocation[1], song.lat, song.lng),
+        playlist: dummyPlaylist // 追加
     });
   };
 
-  // ... 既存のtoggleFavorite, startChatFromProfile, openChatFromList, sendMessage ...
   const toggleFavorite = () => {
     if (!viewingUser) return;
     const name = viewingUser.name;
@@ -369,17 +351,18 @@ function App() {
     const song = { id: videoId, title: songData.title, artist: songData.artist, image: songData.image || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` };
     setCurrentSong(song); setIsPlayerExpanded(autoExpand); setIsPlaying(true); setCurrentTime(0); setDuration(0);
     
-    // ★認証済みの場合のみ、共有APIを呼び出す
-    const isAlreadyShared = nearbySongs.some(s => s.title === song.title);
+    const isAlreadyShared = nearbySongs.some(s => s.title === song.title && s.sharedBy === myUsername);
     if (!isAlreadyShared && isLoggedIn) {
-      axios.post('http://127.0.0.1:8000/api/songs', { 
+      axios.post(`${API_BASE_URL}/songs`, { 
         title: song.title, 
         artist: song.artist, 
         sharedBy: myUsername, 
         distance: '0m', 
-        videoId: song.id 
+        videoId: song.id,
+        lat: myLocation ? myLocation[0] : null,
+        lng: myLocation ? myLocation[1] : null
       }, {
-        headers: getAuthHeader() // 認証ヘッダーを追加
+        headers: getAuthHeader()
       }).catch(console.error);
     }
   };
@@ -404,24 +387,13 @@ function App() {
     setShowAddToPlaylistModal(false); alert("追加しました！");
   };
 
-  // -------------------------------------------------------------
-  // レンダリング (ログイン画面をAuthScreenに置き換え)
-  // -------------------------------------------------------------
-
-  if (authLoading) {
-    return <div className="login-screen-rich">ロード中...</div>;
-  }
-
-  // ★AuthScreenコンポーネントを表示
-  if (!isLoggedIn) {
-    return <AuthScreen onLoginSuccess={handleLoginSuccess} />;
-  }
+  if (authLoading) return <div className="login-screen-rich">ロード中...</div>;
+  if (!isLoggedIn) return <AuthScreen onLoginSuccess={handleLoginSuccess} />;
 
   return (
     <div className="App">
       <div className={`main-content ${currentSong ? 'has-mini-player' : ''}`}>
         
-        {/* ヘッダーにログアウトボタンを追加 */}
         <header className="app-header" onClick={resetHome} style={{cursor:'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
           <h1>Music Radar 📡</h1>
           <button onClick={handleLogout} style={{background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '14px'}}>
@@ -592,6 +564,25 @@ function App() {
                                 <div style={{fontSize:'11px', color:'#ccc'}}>{viewingUser.artist}</div>
                             </div>
                             <FaMusic style={{color:'#00d4ff'}}/>
+                        </div>
+                    </div>
+                    
+                    {/* ★追加: 他人のプレイリスト表示 */}
+                    <div className="user-public-playlist" style={{marginTop: '20px', textAlign: 'left'}}>
+                        <h4 style={{fontSize:'14px', color:'#ddd', borderBottom:'1px solid #444', paddingBottom:'5px', display:'flex', alignItems:'center', gap:'5px'}}>
+                            <FaCompactDisc /> 公開プレイリスト
+                        </h4>
+                        <div style={{maxHeight:'150px', overflowY:'auto'}}>
+                            {viewingUser.playlist && viewingUser.playlist.map((song, i) => (
+                                <div key={i} className="mini-song-row" onClick={() => playSong(song, true)} style={{display:'flex', alignItems:'center', padding:'8px 0', cursor:'pointer'}}>
+                                    <span style={{fontSize:'10px', color:'#666', width:'20px'}}>{i+1}</span>
+                                    <div style={{flex:1}}>
+                                        <div style={{fontSize:'12px', fontWeight:'bold'}}>{song.title}</div>
+                                        <div style={{fontSize:'10px', color:'#aaa'}}>{song.artist}</div>
+                                    </div>
+                                    <FaPlay style={{fontSize:'10px', color:'#666'}}/>
+                                </div>
+                            ))}
                         </div>
                     </div>
                 </div>
