@@ -117,7 +117,7 @@ async def signup_user(req: AuthRequest):
         # 2. ユーザー名(username)を profilesテーブルに保存
         if response.user:
             # profilesテーブルがユーザーのidを主キーに持つ必要があります
-            insert_response = supabase.table('profiles').insert([
+            insert_response = supabase.table('users').insert([
                 {'id': response.user.id, 'username': req.username}
             ]).execute()
             
@@ -151,7 +151,7 @@ async def signin_user(req: AuthRequest):
         # 2. ユーザーIDからユーザー名を取得
         username = None
         if response.user:
-            profile_response = supabase.table('profiles').select('username').eq('id', response.user.id).single().execute()
+            profile_response = supabase.table('users').select('username').eq('id', response.user.id).single().execute()
             if profile_response.data:
                 username = profile_response.data.get('username')
         
@@ -238,8 +238,8 @@ async def get_users():
         return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
     
     try:
-        # profilesテーブルからIDとユーザー名を取得
-        response = supabase.table('profiles').select('id, username').execute()
+        # usersテーブルからIDとユーザー名を取得
+        response = supabase.table('users').select('id, username').execute()
         return JSONResponse(content=response.data)
     except Exception as e:
         print(f"エラーが発生しました: {e}")
