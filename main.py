@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from supabase import create_client
 from pathlib import Path
 import traceback
+from datetime import datetime
 
 try:
     from ytmusicapi import YTMusic
@@ -191,6 +192,7 @@ async def signin_user(req: AuthRequest):
         return JSONResponse(content={"error": error_message or "サインインに失敗しました。メールアドレスとパスワードを確認してください。"}, status_code=400)
     
     
+
 # -------------------------------------------------------------------------
 # APIエンドポイント
 # -------------------------------------------------------------------------
@@ -200,7 +202,6 @@ async def signin_user(req: AuthRequest):
 # -------------------------------------------------------------------------
 # 曲保存エンドポイント
 # -------------------------------------------------------------------------
-
 @app.get("/api/songs")
 async def get_songs():
     """近くのユーザーの曲リストをSupabaseから取得する"""
@@ -210,12 +211,29 @@ async def get_songs():
         return JSONResponse(content=DUMMY_SONGS) 
         
     try:
-        # shared_songsテーブルから全データを取得。
-        # クライアント側で最新の1曲に絞り込むため、created_atで昇順 (古い順) に並び替える
-        # ことで、最新のデータがMapに上書きされることを保証します。
-        response = supabase.table('shared_songs').select('*').order('created_at', ascending=True).execute()
-
-        return JSONResponse(content=response.data)
+        # 各ユーザーの最新の曲だけを返すようにする
+        # 上書き保存の仕組みにより、各ユーザーにつき1曲だけ存在するはず
+        response = supabase.table('shared_songs').select('*').execute()
+        
+        # レスポンスデータを正規化してフロントエンドのフォーマットに一致させる
+        normalized_data = []
+        for song in response.data:
+            # データを正規化: videoIdをキャメルケースで統一
+            normalized_song = {
+                "id": song.get("id"),
+                "title": song.get("title"),
+                "artist": song.get("artist"),
+                "sharedBy": song.get("sharedby"),  # キャメルケースに変換
+                "distance": song.get("distance", "0m"),
+                "videoId": song.get("videoid"),  # キャメルケースに変換
+                "lat": song.get("lat"),
+                "lng": song.get("lng"),
+                "timestamp": song.get("timestamp")
+            }
+            normalized_data.append(normalized_song)
+            
+        # 正規化されたデータを返す
+        return JSONResponse(content=normalized_data)
 
     except Exception as e:
         print(f"Supabase取得エラー: {e}")
@@ -224,39 +242,61 @@ async def get_songs():
 
 @app.post("/api/songs")
 async def add_song(song: SongRequest):
-    """自分の曲をSupabaseにシェアする"""
+    """自分の曲をSupabaseにシェアする（上書き保存）"""
     if not use_supabase:
         return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
     
     # Pydanticモデルから辞書を取得
     song_data = song.dict()
-
-    # Supabaseに挿入するデータ
-    data_to_insert = {
+    
+    shared_by = song_data.get("sharedBy")
+    if not shared_by:
+        return JSONResponse(content={"error": "sharedByは必須です"}, status_code=400)
+    
+    # videoIdの検証
+    video_id = song_data.get("videoId")
+    if not video_id or not isinstance(video_id, str) or len(video_id) < 8:
+        return JSONResponse(content={"error": "有効なvideoIdが必要です"}, status_code=400)
+    
+    print(f"保存するvideoId: {video_id}")  # デバッグ出力
+    
+    # Supabaseに挿入/更新するデータ
+    data_to_upsert = {
         "title": song_data.get("title"),
         "artist": song_data.get("artist"),
-        "sharedBy": song_data.get("sharedBy"),
+        "sharedby": shared_by,  # 小文字に修正
         "distance": song_data.get("distance", "0m"),
-        "videoId": song_data.get("videoId"),
+        "videoid": video_id,  # 小文字に修正
         "lat": song_data.get("lat"),
         "lng": song_data.get("lng"),
-        # Supabase側で created_at は自動生成されることを想定
+        "timestamp": datetime.now().isoformat()  # 現在の時刻を追加
     }
 
     try:
-        # shared_songsテーブルにデータを挿入
-        # .execute()を呼び出して実行
-        response = supabase.table('shared_songs').insert(data_to_insert).execute()
+        # まず同じユーザーの既存レコードがあるか確認
+        existing_records = supabase.table('shared_songs').select('id').eq('sharedby', shared_by).execute()  # 小文字に修正
         
-        # 挿入されたレコードを返す
-        if response.data:
-            print(f"Share saved to Supabase: {response.data[0]['title']}")
-            return JSONResponse(content=response.data[0])
+        if existing_records.data:
+            # 既存レコードがある場合は更新
+            record_id = existing_records.data[0]['id']
+            response = supabase.table('shared_songs').update(data_to_upsert).eq('id', record_id).execute()
+            print(f"Song updated for user {shared_by}: {song_data.get('title')}")
         else:
-            raise Exception("Supabase insert failed: No data returned")
+            # 新規レコードの場合は挿入
+            response = supabase.table('shared_songs').insert(data_to_upsert).execute()
+            print(f"New song shared by {shared_by}: {song_data.get('title')}")
+        
+        # 処理したレコードをフロントエンドフォーマットに変換
+        processed_data = response.data[0] if response.data else {"status": "success"}
+        
+        # フロントエンド用に正規化
+        if isinstance(processed_data, dict) and "videoid" in processed_data:
+            processed_data["videoId"] = processed_data["videoid"]  # キャメルケース版を追加
+        
+        return JSONResponse(content=processed_data)
 
     except Exception as e:
-        print(f"Supabase挿入エラー: {traceback.format_exc()}")
+        print(f"Supabase処理エラー: {traceback.format_exc()}")
         return JSONResponse(content={"error": "曲の共有に失敗しました"}, status_code=500)
 # -------------------------------------------------------------------------
 # APIエンドポイント
@@ -322,7 +362,165 @@ async def get_users():
         print(f"エラーが発生しました: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False)
+
+
+
+# キーをスネークケースからキャメルケースに変換する関数
+def snake_to_camel(snake_str):
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.title() for x in components[1:])
+
+# データ構造全体を再帰的にキャメルケースに変換する関数
+def normalize_to_camel_case(data):
+    if isinstance(data, list):
+        return [normalize_to_camel_case(item) for item in data]
+    
+    if isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            camel_key = snake_to_camel(key)
+            if isinstance(value, (dict, list)):
+                result[camel_key] = normalize_to_camel_case(value)
+            else:
+                result[camel_key] = value
+        return result
+    
+    return data
+
+# プレイリスト作成エンドポイント
+@app.post("/api/playlists")
+async def create_playlist(playlist, request):
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return JSONResponse(content={"error": "認証が必要です"}, status_code=401)
+    
+    if not use_supabase:
+        return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
+    
+    try:
+        # トークンからユーザーIDを取得
+        token = authorization.split(' ')[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+        
+        # プレイリストをデータベースに保存
+        playlist_data = {
+            "title": playlist.title,
+            "description": playlist.description,
+            "user_id": user_id
+        }
+        
+        result = supabase.table("playlists").insert(playlist_data).execute()
+        
+        if len(result.data) > 0:
+            # 作成されたプレイリスト情報を正規化して返す
+            return normalize_to_camel_case(result.data[0])
+        else:
+            return JSONResponse(content={"error": "プレイリストの作成に失敗しました"}, status_code=500)
+    
+    except Exception as e:
+        print(f"Error creating playlist: {e}")
+        traceback.print_exc()
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# プレイリストに曲を追加するエンドポイント
+@app.post("/api/playlists/{playlist_id}/songs")
+async def add_song_to_playlist(playlist_id, song, request):
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return JSONResponse(content={"error": "認証が必要です"}, status_code=401)
+    
+    try:
+        # トークンからユーザーIDを取得
+        token = authorization.split(' ')[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+        
+        # プレイリストのオーナーを確認
+        playlist = supabase.table("playlists").select("*").eq("id", playlist_id).eq("user_id", user_id).execute()
+        
+        if len(playlist.data) == 0:
+            return JSONResponse(content={"error": "プレイリストが見つからないか、アクセス権限がありません"}, status_code=404)
+        
+        # 曲情報にプレイリストIDとユーザーIDを追加
+        song_data = {
+            **song,
+            "playlist_id": playlist_id,
+            "user_id": user_id
+        }
+        
+        # 曲をデータベースに保存
+        result = supabase.table("playlist_songs").insert(song_data).execute()
+        
+        if len(result.data) > 0:
+            return normalize_to_camel_case(result.data[0])
+        else:
+            return JSONResponse(content={"error": "曲の追加に失敗しました"}, status_code=500)
+    
+    except Exception as e:
+        print(f"Error adding song to playlist: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# ユーザーのプレイリスト一覧を取得するエンドポイント
+@app.get("/api/playlists")
+async def get_playlists(request):
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return JSONResponse(content={"error": "認証が必要です"}, status_code=401)
+    
+    try:
+        # トークンからユーザーIDを取得
+        token = authorization.split(' ')[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+        
+        # ユーザーのプレイリストを取得
+        playlists = supabase.table("playlists").select("*").eq("user_id", user_id).execute()
+        
+        # 各プレイリストの曲数を取得
+        result = []
+        for playlist in playlists.data:
+            songs_count = supabase.table("playlist_songs").select("*", count="exact").eq("playlist_id", playlist["id"]).execute()
+            playlist["songs_count"] = songs_count.count
+            result.append(playlist)
+        
+        return normalize_to_camel_case(result)
+    
+    except Exception as e:
+        print(f"Error fetching playlists: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# 特定のプレイリストの詳細を取得するエンドポイント
+@app.get("/api/playlists/{playlist_id}")
+async def get_playlist_detail(playlist_id, request):
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return JSONResponse(content={"error": "認証が必要です"}, status_code=401)
+    
+    try:
+        # トークンからユーザーIDを取得
+        token = authorization.split(' ')[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+        
+        # プレイリスト情報を取得
+        playlist = supabase.table("playlists").select("*").eq("id", playlist_id).execute()
+        
+        if len(playlist.data) == 0:
+            return JSONResponse(content={"error": "プレイリストが見つかりません"}, status_code=404)
+        
+        playlist_data = playlist.data[0]
+        
+        # プレイリストの曲を取得
+        songs = supabase.table("playlist_songs").select("*").eq("playlist_id", playlist_id).execute()
+        
+        playlist_data["songs"] = songs.data
+        
+        return normalize_to_camel_case(playlist_data)
+    
+    except Exception as e:
+        print(f"Error fetching playlist detail: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
