@@ -24,7 +24,16 @@ let DefaultIcon = L.icon({
 });
 L.Marker.prototype.options.icon = DefaultIcon;
 
-const API_BASE_URL = 'https://hackathon-20251213.onrender.com/api'; 
+//const API_BASE_URL = 'http://127.0.0.1:8000/api'; 
+const API_BASE_URL = 'https://hackathon-20251213.onrender.com/api';
+
+// 画像エラー完全防止関数
+const getThumbUrl = (videoId) => {
+    if (!videoId || typeof videoId !== 'string' || videoId === 'default' || videoId === 'undefined' || videoId === 'null') {
+        return "https://via.placeholder.com/120x90?text=No+Image";
+    }
+    return `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
+};
 
 const formatTime = (seconds) => {
   if (!seconds) return "0:00";
@@ -57,7 +66,7 @@ function getDistance(lat1, lng1, lat2, lng2) {
   return Math.round(Math.sqrt(x*x + y*y) * 111000);
 }
 
-// --- Supabase認証画面 ---
+// --- 認証画面 ---
 function AuthScreen({ onLoginSuccess }) {
   const [isSignUp, setIsSignUp] = useState(false); 
   const [email, setEmail] = useState('');
@@ -84,7 +93,11 @@ function AuthScreen({ onLoginSuccess }) {
       }
     } catch (err) {
       console.error("Auth Error:", err.response ? err.response.data : err);
-      setError(err.response?.data?.error || "認証に失敗しました。");
+      if (err.response?.status === 400 && !isSignUp) {
+          setError("ログイン失敗: ユーザー登録されていないか、パスワードが違います。");
+      } else {
+          setError(err.response?.data?.error || "認証に失敗しました。");
+      }
     } finally {
       setLoading(false);
     }
@@ -131,7 +144,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [nearbySongs, setNearbySongs] = useState([]);
-  const [myPlaylists, setMyPlaylists] = useState([{ id: 1, name: 'お気に入り', songs: [] }]);
+  const [myPlaylists, setMyPlaylists] = useState([{ id: 'default', title: 'お気に入り', songsCount: 0 }]);
   
   const [viewingUser, setViewingUser] = useState(null); 
   const [favoriteUsers, setFavoriteUsers] = useState([]);
@@ -161,7 +174,8 @@ function App() {
     setMyUsername(username); setAuthToken(token); setIsLoggedIn(true);
   };
   const handleLogout = () => {
-    setMyUsername(""); setAuthToken(null); setIsLoggedIn(false); setActiveTab('home');
+    setMyUsername(""); setAuthToken(null); setIsLoggedIn(false); setActiveTab('home'); 
+    setMyPlaylists([{ id: 'default', title: 'お気に入り', songsCount: 0 }]);
   };
 
   useEffect(() => {
@@ -175,6 +189,32 @@ function App() {
     axios.get(`${API_BASE_URL}/charts`).then(res => setPopularSongs(res.data)).catch(() => setPopularSongs([]));
   }, []);
 
+  // プレイリスト取得 & お気に入り自動作成
+  useEffect(() => {
+    if (isLoggedIn && authToken) {
+      axios.get(`${API_BASE_URL}/playlists`, { headers: getAuthHeader() })
+        .then(async res => {
+            let playlists = res.data;
+            if (playlists.length === 0) {
+                // DBに作成
+                try {
+                    const createRes = await axios.post(
+                        `${API_BASE_URL}/playlists`, 
+                        { title: 'お気に入り', description: '自動作成' }, 
+                        { headers: getAuthHeader() }
+                    );
+                    setMyPlaylists([createRes.data]);
+                } catch (e) {
+                    console.error("自動作成失敗:", e);
+                }
+            } else {
+                setMyPlaylists(playlists);
+            }
+        })
+        .catch(err => console.error("プレイリスト取得失敗:", err));
+    }
+  }, [isLoggedIn, authToken, getAuthHeader]);
+
   useEffect(() => {
     if (!locationLoaded || !isLoggedIn) return;
     const fetchNearby = () => {
@@ -182,12 +222,17 @@ function App() {
           const uniqueSongsMap = new Map();
           res.data.forEach(song => { uniqueSongsMap.set(song.sharedBy, song); });
           const uniqueSongs = Array.from(uniqueSongsMap.values());
-          const songsAroundMe = uniqueSongs.map((song) => {
-            if (song.lat && song.lng) return song;
-            const latOffset = getStableOffset(song.sharedBy);
-            const lngOffset = getStableOffset(song.sharedBy + "_lng");
-            return { ...song, lat: myLocation[0] + latOffset, lng: myLocation[1] + lngOffset };
-          });
+          
+          const songsAroundMe = uniqueSongs
+            // ★IDがないデータを除外
+            .filter(song => song.videoId && song.videoId.length > 5)
+            .map((song) => {
+                if (song.lat && song.lng) return song;
+                const latOffset = getStableOffset(song.sharedBy);
+                const lngOffset = getStableOffset(song.sharedBy + "_lng");
+                return { ...song, lat: myLocation[0] + latOffset, lng: myLocation[1] + lngOffset };
+            });
+            
           setNearbySongs(songsAroundMe);
       }).catch(console.error);
     };
@@ -198,9 +243,14 @@ function App() {
 
   useEffect(() => {
     if (!playerObj || !isPlaying) return;
+    if (typeof playerObj.getCurrentTime !== 'function') return;
+
     const timeInterval = setInterval(() => {
-      setCurrentTime(playerObj.getCurrentTime());
-      if (duration === 0) setDuration(playerObj.getDuration());
+      try {
+        const t = playerObj.getCurrentTime();
+        if (t) setCurrentTime(t);
+        if (duration === 0) setDuration(playerObj.getDuration());
+      } catch (e) { }
     }, 1000);
     return () => clearInterval(timeInterval);
   }, [playerObj, isPlaying, duration]);
@@ -216,17 +266,31 @@ function App() {
     }
   };
 
-  const openUserProfile = (e, song) => {
+  const openUserProfile = async (e, song) => {
     e.stopPropagation();
-    const dummyPlaylist = popularSongs.sort(() => 0.5 - Math.random()).slice(0, 5);
-    setViewingUser({
+    const initialUser = {
         name: song.sharedBy || 'Unknown',
         currentSong: song.title,
         artist: song.artist,
-        image: song.image,
+        image: getThumbUrl(song.videoId),
         dist: getDistance(myLocation[0], myLocation[1], song.lat, song.lng),
-        playlist: dummyPlaylist
-    });
+        playlist: [] 
+    };
+    setViewingUser(initialUser);
+
+    try {
+        const res = await axios.get(`${API_BASE_URL}/users/${song.sharedBy}/public-tracks`);
+        const formattedPlaylist = res.data.map(track => ({
+            id: track.videoId || track.trackVideoId, 
+            videoId: track.videoId || track.trackVideoId,
+            title: track.title || track.trackTitle,
+            artist: track.artist || track.artistName,
+            image: getThumbUrl(track.videoId || track.trackVideoId)
+        }));
+        setViewingUser(prev => ({ ...prev, playlist: formattedPlaylist }));
+    } catch (err) {
+        console.error("ユーザーデータ取得失敗", err);
+    }
   };
 
   const toggleFavorite = () => {
@@ -261,10 +325,20 @@ function App() {
   };
 
   const playSong = (songData, autoExpand = true) => {
-    let videoId = songData.videoId || songData.id;
-    if (!videoId) return alert("再生不可");
-    const song = { id: videoId, title: songData.title, artist: songData.artist, image: songData.image || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` };
+    let videoId = songData.videoId || songData.id || songData.trackVideoId || songData.track_video_id;
+    
+    // IDがないなら再生しない
+    if (!videoId || typeof videoId !== 'string') return alert("再生不可: IDがありません");
+
+    const song = { 
+        id: videoId, 
+        title: songData.title || songData.trackTitle || "Title", 
+        artist: songData.artist || songData.artistName || "Artist", 
+        image: getThumbUrl(videoId) 
+    };
     setCurrentSong(song); setIsPlayerExpanded(autoExpand); setIsPlaying(true); setCurrentTime(0); setDuration(0);
+    setPlayerObj(null); 
+
     const isAlreadyShared = nearbySongs.some(s => s.title === song.title && s.sharedBy === myUsername);
     if (!isAlreadyShared && isLoggedIn) {
       axios.post(`${API_BASE_URL}/songs`, { 
@@ -276,22 +350,91 @@ function App() {
 
   const handlePlayerStateChange = (e) => setIsPlaying(e.data === 1);
   const handleSeek = (e) => { const t = parseFloat(e.target.value); setCurrentTime(t); playerObj?.seekTo(t); };
-  const skipTime = (s) => { if(playerObj){ const t=playerObj.getCurrentTime()+s; playerObj.seekTo(t); setCurrentTime(t); }};
+  const skipTime = (s) => { 
+      if(playerObj && typeof playerObj.getCurrentTime === 'function'){ 
+          const t=playerObj.getCurrentTime()+s; 
+          playerObj.seekTo(t); 
+          setCurrentTime(t); 
+      }
+  };
 
   const openAddToPlaylist = (e, song) => {
     e.stopPropagation();
-    const videoId = song.videoId || song.id;
-    const cleanSong = { id: videoId, videoId, title: song.title, artist: song.artist, image: song.image || `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` };
+    const videoId = song.videoId || song.id || song.trackVideoId;
+    if(!videoId) return alert("曲情報不足");
+
+    const cleanSong = { 
+        id: videoId, 
+        videoId, 
+        title: song.title || song.trackTitle, 
+        artist: song.artist || song.artistName, 
+        image: getThumbUrl(videoId) 
+    };
     setSongToAdd(cleanSong); setShowAddToPlaylistModal(true);
   };
-  const executeAddToPlaylist = (playlistId) => {
-    setMyPlaylists(prev => prev.map(pl => {
-        if (pl.id === playlistId) {
-            if (pl.songs.some(s => s.id === songToAdd.id)) return pl;
-            return { ...pl, songs: [...pl.songs, songToAdd] };
-        } return pl;
-    }));
-    setShowAddToPlaylistModal(false); alert("追加しました！");
+
+  const handleCreatePlaylist = async () => {
+    const name = prompt("プレイリスト名:");
+    if (!name) return;
+    try {
+        const res = await axios.post(`${API_BASE_URL}/playlists`, { title: name }, { headers: getAuthHeader() });
+        setMyPlaylists(prev => [...prev, res.data]);
+    } catch (err) {
+        console.error("作成失敗:", err);
+        alert("プレイリスト作成に失敗しました");
+    }
+  };
+
+  const executeAddToPlaylist = async (playlistId) => {
+    if (playlistId === 'default') {
+        alert("サーバーと同期中です。少し待ってから再度お試しください。");
+        return;
+    }
+    try {
+        await axios.post(
+            `${API_BASE_URL}/playlists/${playlistId}/songs`,
+            {
+                track_video_id: songToAdd.videoId,
+                track_title: songToAdd.title,
+                artist_name: songToAdd.artist,
+                position: 0
+            },
+            { headers: getAuthHeader() }
+        );
+        setMyPlaylists(prev => prev.map(pl => {
+            if (pl.id === playlistId) return { ...pl, songsCount: (pl.songsCount || 0) + 1 };
+            return pl;
+        }));
+        setShowAddToPlaylistModal(false); alert("追加しました！");
+    } catch (err) {
+        console.error("追加失敗:", err);
+        alert("追加に失敗しました");
+    }
+  };
+
+  const handleOpenPlaylist = async (playlist) => {
+    if (playlist.id === 'default') {
+        setViewingPlaylist({ ...playlist, songs: [] });
+        return;
+    }
+    try {
+        const res = await axios.get(`${API_BASE_URL}/playlists/${playlist.id}`, { headers: getAuthHeader() });
+        const formattedData = {
+            ...res.data,
+            songs: res.data.songs.map(s => ({
+                ...s,
+                id: s.trackVideoId, 
+                videoId: s.trackVideoId,
+                title: s.trackTitle,
+                artist: s.artistName,
+                image: getThumbUrl(s.trackVideoId)
+            }))
+        };
+        setViewingPlaylist(formattedData);
+    } catch (err) {
+        console.error("詳細取得失敗", err);
+        setViewingPlaylist({ ...playlist, songs: [] });
+    }
   };
 
   if (authLoading) return <div className="login-screen-rich">ロード中...</div>;
@@ -307,8 +450,6 @@ function App() {
             ログアウト <FaSignInAlt style={{transform: 'rotate(180deg)'}} />
           </button>
         </header>
-
-        {/* ★削除: 上部の tab-menu を削除しました */}
 
         {activeTab === 'home' && (
           <div className="song-list" style={{paddingTop: '20px'}}>
@@ -361,7 +502,8 @@ function App() {
                         </div>
                         <div style={{fontSize:'9px', color:'#aaa', marginTop:'2px'}}>{dist}m</div>
                     </div>
-                    <img src={song.image || `https://img.youtube.com/vi/${vId}/mqdefault.jpg`} alt="art" className="song-thumb" style={{ width: '40px', height: '40px', borderRadius: '8px' }} />
+                    {/* ★修正: 安全なサムネ関数 */}
+                    <img src={getThumbUrl(vId)} alt="art" className="song-thumb" style={{ width: '40px', height: '40px', borderRadius: '8px' }} />
                     <div className="song-info" style={{flex:1}}>
                       <div className="song-title" style={{ fontSize: '14px' }}>{song.title}</div>
                       <div className="song-artist" style={{ fontSize: '12px', color: '#aaa' }}>{song.artist}</div>
@@ -413,29 +555,36 @@ function App() {
                 <div className="playlist-detail">
                     <div className="detail-header" style={{display:'flex', alignItems:'center', marginBottom:'20px'}}>
                         <button onClick={() => setViewingPlaylist(null)} style={{background:'none', border:'none', color:'white', fontSize:'20px', marginRight:'15px', cursor:'pointer'}}><FaArrowLeft /></button>
-                        <h2 style={{margin:0}}>{viewingPlaylist.name}</h2>
+                        <h2 style={{margin:0}}>{viewingPlaylist.name || viewingPlaylist.title}</h2>
                     </div>
-                    {viewingPlaylist.songs.length === 0 ? (
+                    {(!viewingPlaylist.songs || viewingPlaylist.songs.length === 0) ? (
                         <p style={{textAlign:'center', color:'#888', marginTop:'50px'}}>曲がありません。<br/>追加してください。</p>
                     ) : (
-                        viewingPlaylist.songs.map((song, index) => (
-                            <div key={index} className="song-item" onClick={() => playSong(song, true)}>
-                                <span className="rank-number" style={{fontSize:'12px', color:'#666'}}>{index + 1}</span>
-                                <img src={song.image} alt="art" className="song-thumb" />
-                                <div className="song-info"><div className="song-title">{song.title}</div><div className="song-artist">{song.artist}</div></div>
-                                <button className="play-icon-btn"><FaPlay /></button>
-                            </div>
-                        ))
+                        viewingPlaylist.songs.map((song, index) => {
+                            const vid = song.trackVideoId || song.videoId;
+                            return (
+                                <div key={index} className="song-item" onClick={() => playSong(song, true)}>
+                                    <span className="rank-number" style={{fontSize:'12px', color:'#666'}}>{index + 1}</span>
+                                    {/* ★修正: 安全なサムネ関数 */}
+                                    <img 
+                                        src={getThumbUrl(vid)}
+                                        alt="art" className="song-thumb" 
+                                    />
+                                    <div className="song-info"><div className="song-title">{song.trackTitle || song.title}</div><div className="song-artist">{song.artistName || song.artist}</div></div>
+                                    <button className="play-icon-btn"><FaPlay /></button>
+                                </div>
+                            );
+                        })
                     )}
                 </div>
             ) : (
                 <>
-                    <div className="create-playlist" onClick={() => { const name = prompt("プレイリスト名:"); if(name) setMyPlaylists([...myPlaylists, { id: Date.now(), name, songs: [] }]); }}>
+                    <div className="create-playlist" onClick={handleCreatePlaylist}>
                       <div className="plus-icon"><FaPlus /></div><span>新しいプレイリストを作成</span>
                     </div>
                     {myPlaylists.map(playlist => (
-                       <div key={playlist.id} className="playlist-card" onClick={() => setViewingPlaylist(playlist)}>
-                        <div className="playlist-art">🎵</div><div className="playlist-info"><h3>{playlist.name}</h3><p>{playlist.songs.length} 曲</p></div><FaEllipsisV style={{color:'#666'}} />
+                       <div key={playlist.id} className="playlist-card" onClick={() => handleOpenPlaylist(playlist)}>
+                        <div className="playlist-art">🎵</div><div className="playlist-info"><h3>{playlist.title}</h3><p>{playlist.songsCount || 0} 曲</p></div><FaEllipsisV style={{color:'#666'}} />
                       </div>
                     ))}
                 </>
@@ -455,7 +604,7 @@ function App() {
                     <div className="current-listening-card">
                         <p style={{fontSize:'10px', color:'#aaa', marginBottom:'5px'}}>再生中</p>
                         <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
-                            <img src={viewingUser.image || `https://img.youtube.com/vi/default/mqdefault.jpg`} style={{width:'40px', borderRadius:'4px'}} alt=""/>
+                            <img src={viewingUser.image || getThumbUrl(null)} style={{width:'40px', borderRadius:'4px'}} alt=""/>
                             <div style={{flex:1, overflow:'hidden'}}>
                                 <div style={{fontWeight:'bold', fontSize:'13px', whiteSpace:'nowrap'}}>{viewingUser.currentSong}</div>
                                 <div style={{fontSize:'11px', color:'#ccc'}}>{viewingUser.artist}</div>
@@ -468,16 +617,20 @@ function App() {
                             <FaCompactDisc /> 公開プレイリスト
                         </h4>
                         <div style={{maxHeight:'150px', overflowY:'auto'}}>
-                            {viewingUser.playlist && viewingUser.playlist.map((song, i) => (
-                                <div key={i} className="mini-song-row" onClick={() => playSong(song, true)} style={{display:'flex', alignItems:'center', padding:'8px 0', cursor:'pointer'}}>
-                                    <span style={{fontSize:'10px', color:'#666', width:'20px'}}>{i+1}</span>
-                                    <div style={{flex:1}}>
-                                        <div style={{fontSize:'12px', fontWeight:'bold'}}>{song.title}</div>
-                                        <div style={{fontSize:'10px', color:'#aaa'}}>{song.artist}</div>
+                            {viewingUser.playlist && viewingUser.playlist.length > 0 ? (
+                                viewingUser.playlist.map((song, i) => (
+                                    <div key={i} className="mini-song-row" onClick={() => playSong(song, true)} style={{display:'flex', alignItems:'center', padding:'8px 0', cursor:'pointer'}}>
+                                        <span style={{fontSize:'10px', color:'#666', width:'20px'}}>{i+1}</span>
+                                        <div style={{flex:1}}>
+                                            <div style={{fontSize:'12px', fontWeight:'bold'}}>{song.title}</div>
+                                            <div style={{fontSize:'10px', color:'#aaa'}}>{song.artist}</div>
+                                        </div>
+                                        <FaPlay style={{fontSize:'10px', color:'#666'}}/>
                                     </div>
-                                    <FaPlay style={{fontSize:'10px', color:'#666'}}/>
-                                </div>
-                            ))}
+                                ))
+                            ) : (
+                                <p style={{color: '#666', fontSize: '12px', padding: '10px'}}>公開プレイリストはありません</p>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -526,26 +679,42 @@ function App() {
                   <div className="modal-song-preview"><img src={songToAdd.image} alt="art" /><div><p><b>{songToAdd.title}</b></p><p style={{fontSize:'12px'}}>{songToAdd.artist}</p></div></div>
                   <hr style={{borderColor:'#444', margin:'15px 0'}}/>
                   <div className="modal-list">
-                      {myPlaylists.map(pl => (<div key={pl.id} className="modal-item" onClick={() => executeAddToPlaylist(pl.id)}><span>{pl.name}</span><span style={{fontSize:'12px', color:'#888'}}>{pl.songs.length}曲</span></div>))}
+                      {/* executeAddToPlaylist (DB連携) */}
+                      {myPlaylists.map(pl => (<div key={pl.id} className="modal-item" onClick={() => executeAddToPlaylist(pl.id)}><span>{pl.name || pl.title}</span><span style={{fontSize:'12px', color:'#888'}}>{pl.songsCount || 0}曲</span></div>))}
                   </div>
                   <button className="modal-close-btn" onClick={() => setShowAddToPlaylistModal(false)}>キャンセル</button>
               </div>
           </div>
       )}
 
-      {currentSong && (
+      {currentSong && currentSong.id && (
         <div className={`player-container ${isPlayerExpanded ? 'expanded' : 'mini'}`}>
           {!isPlayerExpanded && (
             <div className="mini-player-bar" onClick={() => setIsPlayerExpanded(true)}>
               <img src={currentSong.image} alt="art" className="mini-thumb" />
               <div className="mini-info"><div className="mini-title">{currentSong.title}</div><div className="mini-artist">{currentSong.artist}</div></div>
-              <button className="mini-play-btn" onClick={(e) => { e.stopPropagation(); isPlaying ? playerObj.pauseVideo() : playerObj.playVideo(); }}>{isPlaying ? <FaPause /> : <FaPlay />}</button>
+              <button className="mini-play-btn" onClick={(e) => { 
+                  e.stopPropagation(); 
+                  if(playerObj && typeof playerObj.pauseVideo === 'function') {
+                      isPlaying ? playerObj.pauseVideo() : playerObj.playVideo();
+                  }
+              }}>
+                  {isPlaying ? <FaPause /> : <FaPlay />}
+              </button>
             </div>
           )}
-          <div className="full-player-content" style={{ display: isPlayerExpanded ? 'flex' : 'none' }}>
+          
+          {/* ★重要修正: display: none ではなく visibility: hidden で隠す */}
+          <div className="full-player-content" style={isPlayerExpanded ? { display: 'flex' } : { visibility: 'hidden', position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}>
             <div className="full-header"><button className="close-btn" onClick={() => setIsPlayerExpanded(false)}><FaChevronDown /></button><span>再生中</span><button className="menu-btn"><FaList /></button></div>
             <div className="youtube-wrapper">
-              <YouTube videoId={currentSong.id} opts={{ height: '100%', width: '100%', playerVars: { autoplay: 1, playsinline: 1, controls: 0 } }} onReady={(e) => {setPlayerObj(e.target); setDuration(e.target.getDuration());}} onStateChange={handlePlayerStateChange} className="youtube-iframe" />
+              <YouTube 
+                videoId={currentSong.id} 
+                opts={{ height: '100%', width: '100%', playerVars: { autoplay: 1, playsinline: 1, controls: 0, origin: window.location.origin } }} 
+                onReady={(e) => {setPlayerObj(e.target); setDuration(e.target.getDuration());}} 
+                onStateChange={handlePlayerStateChange} 
+                className="youtube-iframe" 
+              />
               <div className="touch-layer"></div>
             </div>
             <div className="full-info"><h2>{currentSong.title}</h2><p>{currentSong.artist}</p></div>
@@ -555,14 +724,19 @@ function App() {
             </div>
             <div className="full-controls">
               <button className="control-btn" onClick={() => skipTime(-10)}><FaUndo style={{fontSize:'24px'}} /><span style={{fontSize:'10px', display:'block'}}>-10s</span></button>
-              <button className="play-circle" onClick={() => isPlaying ? playerObj.pauseVideo() : playerObj.playVideo()}>{isPlaying ? <FaPause /> : <FaPlay style={{marginLeft:'4px'}}/>}</button>
+              <button className="play-circle" onClick={() => { 
+                  if(playerObj && typeof playerObj.pauseVideo === 'function') {
+                      isPlaying ? playerObj.pauseVideo() : playerObj.playVideo();
+                  }
+              }}>
+                  {isPlaying ? <FaPause /> : <FaPlay style={{marginLeft:'4px'}}/>}
+              </button>
               <button className="control-btn" onClick={() => skipTime(10)}><FaRedo style={{fontSize:'24px'}} /><span style={{fontSize:'10px', display:'block'}}>+10s</span></button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ★修正: ボトムナビをリッチ化し、上部タブメニューを削除したためここ一本化 */}
       <nav className="bottom-nav">
         <div className={`nav-item ${activeTab === 'home' ? 'active' : ''}`} onClick={() => { setActiveTab('home'); resetHome(); }}>
             <FaHome /><span>ホーム</span>
