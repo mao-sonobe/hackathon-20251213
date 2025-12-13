@@ -164,7 +164,7 @@ expiry: TIMESTAMP WITH TIME ZONE - 有効期限
 id: UUID [主キー, DEFAULT uuid_generate_v4()] - 共有曲の一意識別子
 title: VARCHAR(255) [必須] - 曲のタイトル
 artist: VARCHAR(255) [必須] - アーティスト名
-shared_by_user_id: UUID [外部キー→users.id] - 共有したユーザーID
+sharedby: UUID [外部キー→users.id] - 共有したユーザーID
 distance: VARCHAR(50) [DEFAULT '0m'] - 共有者からの距離
 video_id: VARCHAR(50) - YouTube/動画ID
 lat: DOUBLE PRECISION - 共有位置の緯度

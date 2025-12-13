@@ -239,6 +239,7 @@ async def get_songs():
         print(f"Supabase取得エラー: {e}")
         # エラー発生時も空のリストまたはバックアップデータを返す
         return JSONResponse(content=DUMMY_SONGS)
+
 @app.post("/api/songs")
 async def add_song(song: SongRequest):
     """自分の曲をSupabaseにシェアする（上書き保存）"""
@@ -252,22 +253,6 @@ async def add_song(song: SongRequest):
     if not shared_by:
         return JSONResponse(content={"error": "sharedByは必須です"}, status_code=400)
     
-    # 再生状態を取得（デフォルトはTrue）
-    is_playing = song_data.get("isPlaying", True)
-    
-    # is_playingがFalseの場合、レコードを削除する
-    if not is_playing:
-        try:
-            # ユーザーの既存レコードを削除
-            delete_response = supabase.table('shared_songs').delete().eq('sharedby', shared_by).execute()
-            print(f"Song record deleted for user {shared_by} (playback stopped)")
-            return JSONResponse(content={"status": "deleted", "message": "再生を停止したため、共有を終了しました"})
-        except Exception as e:
-            print(f"Supabase削除エラー: {traceback.format_exc()}")
-            return JSONResponse(content={"error": "共有曲の削除に失敗しました"}, status_code=500)
-    
-    # ここから下は再生中の処理（is_playing = True）
-    
     # videoIdの検証
     video_id = song_data.get("videoId")
     if not video_id or not isinstance(video_id, str) or len(video_id) < 8:
@@ -279,9 +264,9 @@ async def add_song(song: SongRequest):
     data_to_upsert = {
         "title": song_data.get("title"),
         "artist": song_data.get("artist"),
-        "sharedby": shared_by,  # 小文字に修正
+        "sharedby": shared_by,  # データベースのフィールド名に合わせて小文字
         "distance": song_data.get("distance", "0m"),
-        "videoid": video_id,  # 小文字に修正
+        "videoid": video_id,  # データベースのフィールド名に合わせて小文字
         "lat": song_data.get("lat"),
         "lng": song_data.get("lng"),
         "timestamp": datetime.now().isoformat(),  # 現在の時刻を追加
@@ -290,7 +275,7 @@ async def add_song(song: SongRequest):
 
     try:
         # まず同じユーザーの既存レコードがあるか確認
-        existing_records = supabase.table('shared_songs').select('id').eq('sharedby', shared_by).execute()  # 小文字に修正
+        existing_records = supabase.table('shared_songs').select('id').eq('sharedby', shared_by).execute()
         
         if existing_records.data:
             # 既存レコードがある場合は更新
@@ -305,15 +290,52 @@ async def add_song(song: SongRequest):
         # 処理したレコードをフロントエンドフォーマットに変換
         processed_data = response.data[0] if response.data else {"status": "success"}
         
-        # フロントエンド用に正規化
-        if isinstance(processed_data, dict) and "videoid" in processed_data:
-            processed_data["videoId"] = processed_data["videoid"]  # キャメルケース版を追加
+        # フロントエンド用に正規化（キャメルケースに変換）
+        if isinstance(processed_data, dict):
+            if "videoid" in processed_data:
+                processed_data["videoId"] = processed_data["videoid"]
+            if "sharedby" in processed_data:
+                processed_data["sharedBy"] = processed_data["sharedby"]
         
         return JSONResponse(content=processed_data)
 
     except Exception as e:
         print(f"Supabase処理エラー: {traceback.format_exc()}")
         return JSONResponse(content={"error": "曲の共有に失敗しました"}, status_code=500)
+    
+@app.delete("/api/songs/{username}")
+async def delete_song(username: str):
+    """ユーザーが共有している曲を削除する"""
+    if not use_supabase:
+        return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
+    
+    try:
+        # 1. ユーザー名からユーザーIDを取得
+        user_response = supabase.table('users').select('id').eq('username', username).single().execute()
+        
+        if not user_response.data:
+            print(f"User not found: {username}")
+            return JSONResponse(content={"error": f"ユーザー '{username}' が見つかりません"}, status_code=404)
+        
+        user_id = user_response.data['id']
+        print(f"Found user_id: {user_id} for username: {username}")
+        
+        # 2. ユーザーの共有曲を削除（正しいカラム名 'sharedby' を使用）
+        delete_response = supabase.table('shared_songs').delete().eq('sharedby', username).execute()
+        
+        # 3. 削除結果を確認
+        if delete_response.data and len(delete_response.data) > 0:
+            print(f"Song deleted for user {username}: {delete_response.data}")
+            return JSONResponse(content={"message": f"曲の共有を停止しました", "success": True}, status_code=200)
+        else:
+            print(f"No song found to delete for user {username}")
+            return JSONResponse(content={"message": f"共有中の曲が見つかりませんでした", "success": False}, status_code=404)
+    
+    except Exception as e:
+        error_message = str(e)
+        print(f"Error deleting song for {username}: {error_message}")
+        return JSONResponse(content={"error": f"曲の削除中にエラーが発生しました: {error_message}"}, status_code=500)
+
 # -------------------------------------------------------------------------
 # APIエンドポイント
 # -------------------------------------------------------------------------
@@ -341,7 +363,7 @@ async def get_charts():
     except Exception as e:
         print("❌ API Error Detail:", traceback.format_exc())
         return JSONResponse(content=BACKUP_SONGS)
-
+    
 @app.get("/api/search")
 async def search(q: str):
     """ユーザーが入力したキーワードで検索"""
